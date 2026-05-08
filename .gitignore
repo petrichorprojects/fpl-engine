@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Data & models (too large for git; persisted via Railway volume)
+data/cache/
+data/predictions.csv
+models/*.json
+!models/.gitkeep
+
+# Node
+node_modules/
+.next/
+web/node_modules/
+web/.next/
+
+# Electron
+electron/node_modules/
+electron/dist/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+.pytest_cache/

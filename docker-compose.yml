@@ -1,0 +1,49 @@
+# Local dev — mirrors Railway + Vercel production setup
+# Usage: docker compose up
+
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    environment:
+      - PORT=8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  web:
+    image: node:20-alpine
+    working_dir: /app/web
+    command: sh -c "npm install --legacy-peer-deps && npm run dev"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./web:/app/web
+      - web_node_modules:/app/web/node_modules
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Cron job: refresh predictions (same as Railway cron)
+  # Run manually: docker compose run --rm cron
+  cron:
+    build: .
+    command: python scripts/refresh_predictions.py
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    profiles:
+      - cron
+
+volumes:
+  web_node_modules:

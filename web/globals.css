@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background-color: #0d0d1a;
+  color: #e5e7eb;
+}
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #161628; }
+::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }

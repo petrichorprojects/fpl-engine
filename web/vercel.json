@@ -1,0 +1,11 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "rewrites": [
+    {
+      "source": "/api/py/:path*",
+      "destination": "${RAILWAY_API_URL}/:path*"
+    }
+  ]
+}

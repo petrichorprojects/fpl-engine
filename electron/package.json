@@ -1,0 +1,47 @@
+{
+  "name": "fpl-engine",
+  "version": "0.1.0",
+  "description": "FPL Analytics Engine — desktop app",
+  "main": "main.js",
+  "scripts": {
+    "electron": "NODE_ENV=development electron .",
+    "electron:build": "electron-builder",
+    "postinstall": "electron-builder install-app-deps"
+  },
+  "devDependencies": {
+    "electron": "^30.0.0",
+    "electron-builder": "^24.0.0"
+  },
+  "build": {
+    "appId": "com.fpl.engine",
+    "productName": "FPL Engine",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js"
+    ],
+    "extraResources": [
+      { "from": "../web/.next", "to": "web/.next" },
+      { "from": "../web/public", "to": "web/public" },
+      { "from": "../web/package.json", "to": "web/package.json" },
+      { "from": "../fpl_engine", "to": "fpl_engine" },
+      { "from": "../run_engine.py", "to": "run_engine.py" },
+      { "from": "../data", "to": "data", "filter": ["*.csv", "*.json"] }
+    ],
+    "mac": {
+      "category": "public.app-category.sports",
+      "target": ["dmg", "zip"],
+      "icon": "icon.png"
+    },
+    "win": {
+      "target": ["nsis"],
+      "icon": "icon.png"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Sports"
+    }
+  }
+}
