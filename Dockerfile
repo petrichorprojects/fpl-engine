@@ -44,4 +44,4 @@ RUN mkdir -p /app/data/cache /app/models
 
 ENV PORT=8000
 
-CMD uvicorn api_server:app --host 0.0.0.0 --port $PORT
+CMD ["sh", "-c", "echo 'Starting FPL Engine on port $PORT...' && python -c 'from api_server import app; print(\"Import OK\")' && exec uvicorn api_server:app --host 0.0.0.0 --port $PORT"]
