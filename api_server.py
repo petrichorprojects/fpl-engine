@@ -55,20 +55,9 @@ def get_engine() -> FPLEngine:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: warm up the engine."""
+    """Startup: fast boot — no data fetching. Engine loads lazily on first request."""
     print("🚀 FPL Engine API starting up...")
-    engine = get_engine()
-    # Fetch data with cached API calls (no heavy re-fetching)
-    try:
-        engine.fetch_data(fetch_histories=False, verbose=False)
-        engine.build_features(verbose=False)
-        if not engine.predictions_df.empty:
-            print("  ✓ Engine ready with existing predictions")
-        elif engine.minutes_model.is_trained:
-            engine.predict(verbose=False)
-            print("  ✓ Engine ready — predictions generated")
-    except Exception as e:
-        print(f"  ⚠ Startup warning: {e}")
+    print("  ℹ Engine will load data on first request")
     yield
     print("FPL Engine API shutting down.")
 
