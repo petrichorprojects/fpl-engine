@@ -39,15 +39,9 @@ COPY api_server.py ./
 COPY run_engine.py ./
 COPY scripts/ ./scripts/
 
-# Create data/models dirs (persisted via Railway volume)
+# Create data/models dirs
 RUN mkdir -p /app/data/cache /app/models
 
-# Non-root user for security
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
-
-# Railway injects $PORT; default 8000 for local Docker
 ENV PORT=8000
-EXPOSE ${PORT}
 
-CMD ["sh", "-c", "uvicorn api_server:app --host 0.0.0.0 --port ${PORT}"]
+CMD uvicorn api_server:app --host 0.0.0.0 --port $PORT
