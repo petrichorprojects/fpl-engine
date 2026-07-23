@@ -32,6 +32,30 @@ uv run python scripts/gameweek_brief.py --horizon 4     # full brief (~5 min fet
 cannot run — the reminder must never depend on the modelling path succeeding.
 Exit code `2` means "deadline delivered, model unavailable".
 
+### The nag loop (Slack)
+
+A reminder you can ignore is a reminder that fails. `scripts/lineup_nag.py`
+posts to Slack on a cadence that tightens as the deadline nears — a 6h heads-up
+far out, every 20 minutes inside the final two hours — and the **only** thing
+that silences it is proof of action: a screenshot of your lineup posted back
+into the channel. No screenshot, it keeps going.
+
+- **Brain:** `fpl_engine/nag.py` — escalation ladder, state machine, screenshot
+  detection. Pure and network-free (22 tests).
+- **Slack arm:** `fpl_engine/slack_gateway.py` → n8n relay "FPL Lineup Nag
+  Relay" (`/webhook/fpl-nag-relay`). The Slack credential lives on the n8n node;
+  this repo never holds a token. Same pattern as the morning-briefing bot.
+
+Preview the cadence and tone without posting:
+
+```bash
+uv run python scripts/lineup_nag.py --dry-run --simulate-hours 1.5
+```
+
+Deploy (Mac Mini, once): fill `deploy/fpl-nag.env` from the example, then load
+`deploy/com.philipp.fpl-nag.plist` — it runs the check every 15 minutes. Details
+in `deploy/`.
+
 ---
 
 ## Architecture

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs the FPL lineup nag every 15 minutes.
+  Install (on the Mac Mini, once):
+    cp deploy/com.philipp.fpl-nag.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.philipp.fpl-nag.plist
+  Stop:
+    launchctl unload ~/Library/LaunchAgents/com.philipp.fpl-nag.plist
+  Logs: /tmp/fpl-nag.log
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.philipp.fpl-nag</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Volumes/T9/fpl-engine/deploy/run_nag.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>900</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/fpl-nag.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/fpl-nag.log</string>
+</dict>
+</plist>
