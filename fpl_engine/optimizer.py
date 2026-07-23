@@ -199,6 +199,15 @@ class FPLOptimizer:
         current_ids = set(current_squad["element_id"].tolist())
         budget = current_squad["price"].sum() + bank
 
+        # Value a swap over the whole horizon using per-gameweek predictions
+        # when they exist. Multiplying a single gameweek's xP by the horizon
+        # (the previous behaviour) assumes every player faces the same fixture
+        # difficulty every week, which erases the fixture swings that make a
+        # transfer worth making in the first place.
+        horizon_col = "xp_horizon" if "xp_horizon" in all_players.columns else None
+        if horizon_col and horizon_col not in current_squad.columns:
+            horizon_col = None
+
         # Compute marginal value of each potential swap
         transfers = []
 
@@ -223,7 +232,12 @@ class FPLOptimizer:
                 if team_count >= MAX_PER_TEAM:
                     continue
 
-                xp_gain = (player_in.get("xp", 0) - player_out.get("xp", 0)) * horizon
+                if horizon_col:
+                    xp_gain = player_in.get(horizon_col, 0) - player_out.get(horizon_col, 0)
+                else:
+                    # Fallback: no per-gameweek predictions available.
+                    xp_gain = (player_in.get("xp", 0) - player_out.get("xp", 0)) * horizon
+
                 transfers.append({
                     "out_id": player_out["element_id"],
                     "out_name": player_out.get("name", ""),

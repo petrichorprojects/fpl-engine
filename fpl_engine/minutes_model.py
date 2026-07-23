@@ -171,13 +171,16 @@ class MinutesModel:
             X = prepare_model_input(pos_df, self.feature_cols)
             probas = self.models[pos].predict_proba(X)
 
+            # Preserve the caller's row index. A player with a double gameweek
+            # appears on two input rows, so element_id alone is not a key and
+            # callers cannot safely merge on it.
             pos_results = pd.DataFrame({
                 "element_id": pos_df["element_id"].values,
                 "position": pos,
                 "p_bench": probas[:, 0],
                 "p_sub": probas[:, 1],
                 "p_start": probas[:, 2],
-            })
+            }, index=pos_df.index)
             pos_results["predicted_label"] = probas.argmax(axis=1)
             pos_results["predicted_label_name"] = pos_results["predicted_label"].map(LABEL_NAMES)
 
@@ -192,7 +195,7 @@ class MinutesModel:
 
         if not results:
             return pd.DataFrame()
-        return pd.concat(results, ignore_index=True)
+        return pd.concat(results)
 
     def feature_importance(self, pos: str = "MID", top_n: int = 15) -> pd.DataFrame:
         """Return top feature importances for a position model."""

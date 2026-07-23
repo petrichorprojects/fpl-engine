@@ -48,6 +48,10 @@ class PointsModel:
     sub_models: dict[str, xgb.XGBRegressor] = field(default_factory=dict)
     feature_cols: list[str] = field(default_factory=get_points_feature_cols)
     is_trained: bool = False
+    # Offset applied before the GKP log transform. Must be the value computed at
+    # training time — recomputing it from the prediction population gives a
+    # different offset and silently biases every GKP xP.
+    log_shifts: dict[str, float] = field(default_factory=dict)
 
     def train(
         self,
@@ -89,8 +93,10 @@ class PointsModel:
                 # Log-transform for GKPs (high variance, right-skewed)
                 use_log = pos == "GKP"
                 if use_log:
-                    # Shift to handle negative points (own goals, yellow cards)
-                    shift = abs(target.min()) + 1
+                    # Shift to handle negative points (own goals, yellow cards).
+                    # Persisted so predict() reverses the exact same transform.
+                    shift = float(abs(target.min()) + 1)
+                    self.log_shifts[pos] = shift
                     target = np.log1p(target + shift)
 
                 X = prepare_model_input(starters, self.feature_cols)
@@ -194,6 +200,8 @@ class PointsModel:
 
             X = prepare_model_input(pos_df, self.feature_cols)
 
+            # Row index is preserved so callers can align results even when a
+            # player appears more than once (double gameweeks).
             row = {
                 "element_id": pos_df["element_id"].values,
                 "position": pos,
@@ -202,14 +210,9 @@ class PointsModel:
             # Starter prediction
             if pos in self.starter_models:
                 pred = self.starter_models[pos].predict(X)
-                if pos == "GKP":
-                    # Reverse log transform
-                    starters_data = df[(df["position"] == pos) & (df["minutes"] >= 60)]
-                    if not starters_data.empty:
-                        shift = abs(starters_data["total_points"].min()) + 1
-                    else:
-                        shift = 3
-                    pred = np.expm1(pred) - shift
+                if pos in self.log_shifts:
+                    # Reverse the log transform using the training-time offset.
+                    pred = np.expm1(pred) - self.log_shifts[pos]
                 row["e_pts_start"] = pred.clip(min=0)
             else:
                 row["e_pts_start"] = np.full(len(pos_df), 2.0)  # safe default
@@ -220,11 +223,11 @@ class PointsModel:
             else:
                 row["e_pts_sub"] = np.full(len(pos_df), 1.0)  # 1 point for appearance
 
-            results.append(pd.DataFrame(row))
+            results.append(pd.DataFrame(row, index=pos_df.index))
 
         if not results:
             return pd.DataFrame()
-        return pd.concat(results, ignore_index=True)
+        return pd.concat(results)
 
     def feature_importance(self, pos: str = "MID", model_type: str = "starter",
                            top_n: int = 15) -> pd.DataFrame:
@@ -251,6 +254,7 @@ class PointsModel:
         for pos, model in self.sub_models.items():
             model.save_model(str(path / f"sub_{pos}.json"))
         (path / "feature_cols.json").write_text(json.dumps(self.feature_cols))
+        (path / "log_shifts.json").write_text(json.dumps(self.log_shifts))
         print(f"Points models saved to {path}")
 
     def load(self, path: Path | None = None) -> None:
@@ -273,6 +277,11 @@ class PointsModel:
         fc_path = path / "feature_cols.json"
         if fc_path.exists():
             self.feature_cols = json.loads(fc_path.read_text())
+
+        shift_path = path / "log_shifts.json"
+        if shift_path.exists():
+            self.log_shifts = {k: float(v) for k, v in
+                               json.loads(shift_path.read_text()).items()}
 
         self.is_trained = bool(self.starter_models)
         print(f"Loaded points models: starters={list(self.starter_models.keys())}, "

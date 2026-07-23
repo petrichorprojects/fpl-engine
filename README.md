@@ -1,8 +1,36 @@
 # FPL Analytics Engine
 
-A world-class Fantasy Premier League analytics engine with a minutes prediction model, ownership-aware optimizer, and full web/desktop UI.
+A Fantasy Premier League analytics engine with a minutes prediction model, ownership-aware optimizer, deadline tracking, and full web/desktop UI.
 
-**34/34 tests passing** · **~7,800 lines** across Python engine, Next.js frontend, and deployment configs.
+**77/77 tests passing** · **~8,500 lines** across Python engine, Next.js frontend, and deployment configs.
+
+---
+
+## Never miss a deadline
+
+Missing a deadline costs 20-30 points. No modelling improvement in this repo is
+worth a fraction of that, so start here.
+
+```bash
+# Write every remaining gameweek deadline to a calendar file, with
+# alarms 24h and 2h before each one. Import it once; done for the season.
+uv run python -m fpl_engine.deadlines --fresh --ics fpl-deadlines.ics
+```
+
+Deadlines are **not** weekly-on-Saturday. They are 90 minutes before the first
+kickoff of the round, which moves with TV scheduling, midweek rounds, and
+international breaks. The `.ics` tracks the real times from the FPL API.
+
+For the deadline plus a full recommendation in one place:
+
+```bash
+uv run python scripts/gameweek_brief.py --check-only    # deadline only, instant
+uv run python scripts/gameweek_brief.py --horizon 4     # full brief (~5 min fetch)
+```
+
+`gameweek_brief.py` always renders the deadline block, even when the model
+cannot run — the reminder must never depend on the modelling path succeeding.
+Exit code `2` means "deadline delivered, model unavailable".
 
 ---
 
@@ -49,7 +77,9 @@ A world-class Fantasy Premier League analytics engine with a minutes prediction 
 | `calendar.py` | 844 | DGW/BGW detection + prediction + chip timing |
 | `rivals.py` | 474 | Mini-league rival tracking + counter-optimization |
 | `backtest.py` | 713 | Walk-forward season replay + strategy comparison |
-| `engine.py` | 410 | Unified orchestrator |
+| `deadlines.py` | 280 | Gameweek deadlines, countdowns, `.ics` export |
+| `upcoming.py` | 330 | Prediction frames keyed on the **upcoming** fixture |
+| `engine.py` | 520 | Unified orchestrator |
 | `api_server.py` | 398 | FastAPI REST backend |
 
 ## Quick Start
@@ -114,6 +144,19 @@ uv run --with fastapi --with uvicorn uvicorn api_server:app --reload --port 8000
 | `POST` | `/backtest` | Strategy comparison backtest |
 | `POST` | `/rivals` | Rival intelligence report |
 | `GET` | `/calendar` | DGW/BGW calendar + chip timing |
+
+## Operating notes
+
+**The models need in-season data.** Training uses per-fixture history from the
+current season only (`element-summary`). Before roughly GW4 there are not enough
+rounds for the rolling windows to carry signal, and `gameweek_brief.py` will say
+so rather than hand you a confident squad fitted to three matches. The deadline
+half works year-round.
+
+**Predictions are keyed on the upcoming fixture.** `engine.predict(horizon=N)`
+builds one row per (player, upcoming fixture) via `fpl_engine.upcoming`, so a
+double gameweek counts twice and a blank counts zero. Use `xp` for this week's
+lineup and `xp_horizon` for transfer planning — they answer different questions.
 
 ## Key Design Decisions
 

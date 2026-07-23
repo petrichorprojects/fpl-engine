@@ -31,7 +31,8 @@ import numpy as np
 import pandas as pd
 
 from .client import FPLClient
-from .config import POSITIONS, TOTAL_BUDGET
+from .config import POSITIONS, SQUAD_SIZE, TOTAL_BUDGET
+from .deadlines import DeadlineTracker
 from .features import build_player_features
 from .minutes_model import MinutesModel
 from .optimizer import (
@@ -42,6 +43,40 @@ from .optimizer import (
     SquadConstraints,
 )
 from .points_model import PointsModel
+from .upcoming import build_upcoming_frame
+
+
+def _attach_predictions(
+    scored: pd.DataFrame,
+    mins_pred: pd.DataFrame,
+    pts_pred: pd.DataFrame,
+) -> pd.DataFrame:
+    """Join model outputs onto the fixture frame by row index.
+
+    Not by `element_id`: a player with a double gameweek occupies two rows, and
+    merging on the player id would produce a cross product that double-counts
+    them. Both models preserve the input index for exactly this reason.
+
+    Rows a model skipped (a position with too little training data) keep
+    neutral values rather than dropping out of the squad pool entirely.
+    """
+    out = scored.copy()
+
+    for col, default in (("p_bench", 1.0), ("p_sub", 0.0), ("p_start", 0.0)):
+        out[col] = (
+            mins_pred[col].reindex(out.index) if col in mins_pred.columns
+            else pd.Series(default, index=out.index)
+        )
+        out[col] = out[col].fillna(default)
+
+    for col, default in (("e_pts_start", 2.0), ("e_pts_sub", 1.0)):
+        out[col] = (
+            pts_pred[col].reindex(out.index) if col in pts_pred.columns
+            else pd.Series(default, index=out.index)
+        )
+        out[col] = out[col].fillna(default)
+
+    return out
 
 
 @dataclass
@@ -67,7 +102,11 @@ class FPLEngine:
 
     # Prediction state
     predictions_df: pd.DataFrame = field(default_factory=pd.DataFrame)
+    fixture_predictions_df: pd.DataFrame = field(default_factory=pd.DataFrame)
     current_gw: int = 0
+    target_gw: int = 0          # the gameweek whose deadline has not yet passed
+    horizon_gws: list[int] = field(default_factory=list)
+    deadlines: DeadlineTracker | None = None
 
     def fetch_data(self, fetch_histories: bool = True, verbose: bool = True) -> None:
         """Fetch all data from the FPL API.
@@ -95,8 +134,20 @@ class FPLEngine:
             print(f"  ✓ Teams: {len(self.teams_df)}")
 
         self.current_gw = self.client.current_gameweek()
+
+        # The gameweek we are actually picking a team for is the one whose
+        # deadline has not yet passed — which is not always `current_gw`, since
+        # FPL keeps a gameweek "current" until its last match finishes.
+        self.deadlines = DeadlineTracker.from_events(self.client.bootstrap()["events"])
+        nxt = self.deadlines.next_deadline()
+        self.target_gw = nxt.gameweek if nxt else self.current_gw
+
         if verbose:
             print(f"  ✓ Current GW: {self.current_gw}")
+            print(f"  ✓ Target GW:  {self.target_gw}")
+            if nxt:
+                print(f"  ⏰ Deadline in {nxt.human_countdown()} "
+                      f"({nxt.local().strftime('%a %d %b %H:%M %Z')})")
 
         if fetch_histories:
             if verbose:
@@ -153,70 +204,160 @@ class FPLEngine:
 
         return {"minutes": minutes_metrics, "points": points_metrics}
 
-    def predict(self, verbose: bool = True) -> pd.DataFrame:
-        """Generate xP predictions for all players.
+    def predict(self, horizon: int = 1, verbose: bool = True) -> pd.DataFrame:
+        """Generate xP predictions for the upcoming gameweek(s).
 
-        Combines: P(start|sub|bench) from minutes model × E[pts|start/sub]
-        from points model to produce final xP per player.
+        Predictions are built against each player's **upcoming** fixtures — the
+        opponent, venue and rest days they are about to face — not the fixture
+        they last played. See `fpl_engine.upcoming` for why that distinction is
+        the difference between fixture signal and fixture noise.
+
+        Args:
+            horizon: How many gameweeks to predict, starting at `target_gw`.
+                `horizon=1` scores only the upcoming deadline; larger values
+                also produce `xp_horizon`, which transfer planning needs.
+            verbose: Print progress and a leaderboard.
+
+        Returns:
+            One row per player with `xp` (the target gameweek, summed across
+            fixtures so a double counts twice), `xp_gw{n}` per gameweek in the
+            horizon, `xp_horizon` (the sum), and `n_fixtures` (0 for a blank).
         """
         if not self.minutes_model.is_trained or not self.points_model.is_trained:
             raise RuntimeError("Models not trained. Call train() first.")
+        if self.history_df.empty:
+            raise RuntimeError("No history data. Call fetch_data() first.")
 
         if verbose:
             print("\n═══════════════════════════════════════════════════════")
             print("  FPL ENGINE — Predictions")
             print("═══════════════════════════════════════════════════════")
 
-        # Use the latest gameweek features for prediction
-        latest = self._get_latest_features()
+        target = self.target_gw or self.current_gw
+        self.horizon_gws = list(range(target, target + max(1, horizon)))
 
-        if verbose:
-            print(f"  Predicting for {len(latest)} players...")
-
-        # Minutes predictions
-        mins_pred = self.minutes_model.predict(latest)
-        if verbose:
-            print(f"  ✓ Minutes predictions: {len(mins_pred)} players")
-
-        # Points predictions (conditional on playing)
-        pts_pred = self.points_model.predict(latest)
-        if verbose:
-            print(f"  ✓ Points predictions: {len(pts_pred)} players")
-
-        # Combine: xP = P(start) × E[pts|start] + P(sub) × E[pts|sub]
-        combined = mins_pred.merge(pts_pred, on=["element_id", "position"], how="inner")
-        combined["xp"] = (
-            combined["p_start"] * combined["e_pts_start"]
-            + combined["p_sub"] * combined["e_pts_sub"]
+        # Build one row per (player, upcoming fixture).
+        upcoming = build_upcoming_frame(
+            history_df=self.history_df,
+            players_df=self.players_df,
+            fixtures_df=self.fixtures_df,
+            teams_df=self.teams_df,
+            target_gws=self.horizon_gws,
         )
 
-        # Merge with player metadata
-        combined = combined.merge(
-            self.players_df[["element_id", "name", "full_name", "team_id",
-                             "team_name", "price", "selected_pct",
-                             "status", "chance_next_round", "form"]],
-            on="element_id",
-            how="left",
-        )
-        combined["ownership_pct"] = combined["selected_pct"]
+        if upcoming.empty:
+            raise RuntimeError(
+                f"No scheduled fixtures found for GW {self.horizon_gws}. "
+                "The fixture list may be stale — try client.clear_cache()."
+            )
 
-        # Sort by xP descending
-        combined = combined.sort_values("xp", ascending=False).reset_index(drop=True)
+        if verbose:
+            n_players = upcoming["element_id"].nunique()
+            print(f"  Target GW: {target} (horizon: {self.horizon_gws})")
+            print(f"  Fixture rows: {len(upcoming)} across {n_players} players")
+
+        # ── Score every fixture row ──────────────────────────────────────
+        mins_pred = self.minutes_model.predict(upcoming)
+        pts_pred = self.points_model.predict(upcoming)
+
+        # The models return one row per input row in input order, so align by
+        # position within position-group rather than merging on element_id —
+        # a player with a double gameweek appears twice and a merge would
+        # produce a cross product.
+        scored = upcoming.copy()
+        scored = _attach_predictions(scored, mins_pred, pts_pred)
+
+        scored["xp"] = (
+            scored["p_start"] * scored["e_pts_start"]
+            + scored["p_sub"] * scored["e_pts_sub"]
+        )
+
+        # Hard availability: a suspended or long-term-injured player scores 0,
+        # regardless of what their rolling form suggests.
+        if "unavailable" in scored.columns:
+            scored.loc[scored["unavailable"], ["xp", "p_start", "p_sub"]] = 0.0
+
+        self.fixture_predictions_df = scored
+
+        # ── Aggregate to one row per player ──────────────────────────────
+        combined = self._aggregate_fixture_predictions(scored, target)
         self.predictions_df = combined
 
         if verbose:
-            print(f"\n  Top 10 by xP:")
-            print(f"  {'Rank':<5} {'Player':<20} {'Pos':<5} {'Team':<6} "
-                  f"{'Price':<7} {'P(Start)':<10} {'xP':<8}")
-            print(f"  {'─'*5} {'─'*20} {'─'*5} {'─'*6} {'─'*7} {'─'*10} {'─'*8}")
-            for i, row in combined.head(10).iterrows():
-                print(f"  {i+1:<5} {row['name']:<20} {row['position']:<5} "
-                      f"{row.get('team_name', '')[:5]:<6} "
-                      f"£{row['price']/10:.1f}m  "
-                      f"{row['p_start']:.2f}      "
-                      f"{row['xp']:.2f}")
+            self._print_prediction_leaderboard(combined, target)
 
         return combined
+
+    def _aggregate_fixture_predictions(
+        self, scored: pd.DataFrame, target: int
+    ) -> pd.DataFrame:
+        """Collapse per-fixture rows into one row per player."""
+        # Per-gameweek totals: a double gameweek sums both fixtures.
+        per_gw = (
+            scored.groupby(["element_id", "target_gw"])
+            .agg(
+                gw_xp=("xp", "sum"),
+                gw_fixtures=("fixture_id", "size"),
+                gw_p_start=("p_start", "max"),
+                gw_p_sub=("p_sub", "max"),
+            )
+            .reset_index()
+        )
+
+        wide = per_gw.pivot(index="element_id", columns="target_gw", values="gw_xp")
+        wide = wide.rename(columns=lambda gw: f"xp_gw{int(gw)}")
+        # A blank gameweek means no fixture row at all, which is genuinely 0 xP.
+        wide = wide.fillna(0.0)
+        wide["xp_horizon"] = wide.sum(axis=1)
+        wide = wide.reset_index()
+
+        target_rows = per_gw[per_gw["target_gw"] == target].set_index("element_id")
+
+        base_cols = [
+            c for c in ("element_id", "position", "team_id", "name", "full_name",
+                        "price", "selected_pct", "status", "chance_next_round",
+                        "form", "unavailable")
+            if c in scored.columns
+        ]
+        base = scored[base_cols].drop_duplicates(subset="element_id")
+
+        combined = base.merge(wide, on="element_id", how="left")
+        combined["xp"] = combined["element_id"].map(target_rows["gw_xp"]).fillna(0.0)
+        combined["n_fixtures"] = (
+            combined["element_id"].map(target_rows["gw_fixtures"]).fillna(0).astype(int)
+        )
+        combined["p_start"] = combined["element_id"].map(target_rows["gw_p_start"]).fillna(0.0)
+        combined["p_sub"] = combined["element_id"].map(target_rows["gw_p_sub"]).fillna(0.0)
+        combined["xp_horizon"] = combined["xp_horizon"].fillna(0.0)
+
+        # Team names for reporting.
+        if not self.players_df.empty and "team_name" in self.players_df.columns:
+            combined = combined.merge(
+                self.players_df[["element_id", "team_name"]],
+                on="element_id", how="left",
+            )
+
+        # The optimizer's effective-ownership term expects a percentage.
+        combined["ownership_pct"] = combined.get("selected_pct", 0.0)
+
+        return combined.sort_values("xp", ascending=False).reset_index(drop=True)
+
+    def _print_prediction_leaderboard(self, combined: pd.DataFrame, target: int) -> None:
+        blanks = int((combined["n_fixtures"] == 0).sum())
+        doubles = int((combined["n_fixtures"] > 1).sum())
+        print(f"  ✓ {len(combined)} players scored "
+              f"({doubles} with a double, {blanks} blanking)")
+        print(f"\n  Top 10 by xP (GW {target}):")
+        print(f"  {'Rank':<5} {'Player':<20} {'Pos':<5} {'Team':<6} "
+              f"{'Price':<7} {'P(Start)':<10} {'GWs':<5} {'xP':<8}")
+        print(f"  {'─'*5} {'─'*20} {'─'*5} {'─'*6} {'─'*7} {'─'*10} {'─'*5} {'─'*8}")
+        for i, row in combined.head(10).iterrows():
+            print(f"  {i+1:<5} {str(row['name']):<20} {row['position']:<5} "
+                  f"{str(row.get('team_name', ''))[:5]:<6} "
+                  f"£{row['price']/10:.1f}m  "
+                  f"{row['p_start']:.2f}      "
+                  f"{row['n_fixtures']:<5} "
+                  f"{row['xp']:.2f}")
 
     def optimize(
         self,
@@ -256,11 +397,27 @@ class FPLEngine:
             must_exclude=must_exclude or [],
         )
 
-        # Filter to available players
-        available = self.predictions_df[
-            self.predictions_df["status"].isin(["a", "d", None, ""])
-            | self.predictions_df["status"].isna()
-        ].copy()
+        # Filter to selectable players. `unavailable` is resolved from FPL
+        # status in the prediction frame; doubtful players stay in the pool
+        # because the minutes model already discounts their xP.
+        available = self.predictions_df.copy()
+        if "unavailable" in available.columns:
+            available = available[~available["unavailable"].fillna(False)]
+        else:
+            available = available[
+                available["status"].isin(["a", "d", None, ""])
+                | available["status"].isna()
+            ]
+
+        # A player with no fixture cannot score. Leaving blanks in the pool lets
+        # the optimizer spend budget on a guaranteed zero.
+        if "n_fixtures" in available.columns and chip != Chip.FREE_HIT:
+            has_fixture = available[available["n_fixtures"] > 0]
+            # Only apply if enough players remain to fill a legal squad.
+            if len(has_fixture) >= SQUAD_SIZE * 2:
+                available = has_fixture
+
+        available = available.copy()
 
         if verbose:
             print(f"  Available players: {len(available)}")
@@ -295,6 +452,11 @@ class FPLEngine:
         if self.predictions_df.empty:
             raise RuntimeError("No predictions. Call predict() first.")
 
+        if "xp_horizon" not in self.predictions_df.columns or len(self.horizon_gws) < 2:
+            print(f"  ⚠ Predictions cover {len(self.horizon_gws) or 1} GW but the "
+                  f"transfer horizon is {horizon}. Call "
+                  f"predict(horizon={horizon}) for fixture-aware planning.")
+
         current = self.predictions_df[
             self.predictions_df["element_id"].isin(current_squad_ids)
         ].copy()
@@ -324,12 +486,24 @@ class FPLEngine:
         if result is None:
             result = self.optimize(verbose=False)
 
+        gw = self.target_gw or self.current_gw
         lines = [
             "╔═══════════════════════════════════════════════════════╗",
-            "║           FPL ENGINE — GAMEWEEK REPORT               ║",
-            f"║           Gameweek {self.current_gw:>2}                              ║",
+            "║           FPL ENGINE — GAMEWEEK REPORT                ║",
+            f"║           Gameweek {gw:>2}                                 ║",
             "╚═══════════════════════════════════════════════════════╝",
             "",
+        ]
+
+        nxt = self.deadlines.next_deadline() if self.deadlines else None
+        if nxt:
+            lines += [
+                f"  ⏰ DEADLINE: {nxt.local().strftime('%a %d %b, %H:%M %Z')} "
+                f"— {nxt.human_countdown()} left",
+                "",
+            ]
+
+        lines += [
             f"  Total xP: {result.total_xp:.1f}",
             f"  Differential Score: {result.differential_score:.1f}",
             f"  Strategy: {self.optimizer.gamestate.value}",
@@ -389,19 +563,6 @@ class FPLEngine:
         self.points_model.load()
 
     # ── Internal ─────────────────────────────────────────────────────────
-
-    def _get_latest_features(self) -> pd.DataFrame:
-        """Get the most recent feature row per player for prediction."""
-        df = self.features_df.copy()
-
-        # Get the latest gameweek per player
-        if "round" in df.columns:
-            latest_idx = df.groupby("element_id")["round"].idxmax()
-            latest = df.loc[latest_idx].copy()
-        else:
-            latest = df.drop_duplicates(subset="element_id", keep="last").copy()
-
-        return latest
 
     def _print_result(self, result: OptimizationResult, chip: Chip) -> None:
         """Pretty-print optimization result."""
