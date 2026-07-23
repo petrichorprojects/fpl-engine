@@ -1,0 +1,4 @@
+# Minimal deps for the nag loop only (deadlines + Slack relay).
+# The full engine (predictions, optimizer) needs `uv pip install -e .` instead.
+httpx>=0.27
+pandas>=2.0
